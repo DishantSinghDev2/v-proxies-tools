@@ -22,6 +22,45 @@ export interface TestResult {
   region?: string
   isp?: string
   error?: string
+  errorDetail?: string
+}
+
+function getErrnoCode(err: unknown): string | undefined {
+  if (!(err instanceof Error)) return undefined
+  const code = (err as NodeJS.ErrnoException).code
+  if (code) return code
+  // undici wraps network errors inside err.cause
+  const cause = (err as { cause?: unknown }).cause
+  if (cause instanceof Error) return (cause as NodeJS.ErrnoException).code
+  return undefined
+}
+
+function categorizeError(err: unknown): { error: string; errorDetail: string } {
+  const code = getErrnoCode(err)
+  const msg = err instanceof Error ? err.message : String(err)
+  const lmsg = msg.toLowerCase()
+
+  if (code === 'ECONNREFUSED')  return { error: 'Refused',      errorDetail: 'Connection refused — proxy port is closed or server is offline' }
+  if (code === 'ENOTFOUND')     return { error: 'DNS Failed',   errorDetail: `Could not resolve proxy hostname` }
+  if (code === 'ECONNRESET')    return { error: 'Reset',        errorDetail: 'Connection was reset by the proxy server' }
+  if (code === 'ENETUNREACH' || code === 'EHOSTUNREACH')
+                                return { error: 'Unreachable',  errorDetail: 'Network or host unreachable' }
+  if (code === 'ECONNABORTED')  return { error: 'Aborted',      errorDetail: 'Connection was aborted' }
+  if (lmsg.includes('timeout') || lmsg.includes('abort') || code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT')
+                                return { error: 'Timeout',      errorDetail: 'Proxy did not respond within the timeout period' }
+  if (lmsg.includes('socks'))   return { error: 'SOCKS Error',  errorDetail: msg }
+
+  return { error: 'Failed', errorDetail: msg }
+}
+
+function categorizeHttpError(status: number): { error: string; errorDetail: string } {
+  if (status === 407) return { error: 'Auth Required', errorDetail: 'Proxy requires authentication (HTTP 407) — add username and password' }
+  if (status === 401) return { error: 'Unauthorized',  errorDetail: 'Invalid proxy credentials (HTTP 401)' }
+  if (status === 403) return { error: 'Forbidden',     errorDetail: 'Proxy refused the request (HTTP 403)' }
+  if (status === 429) return { error: 'Rate Limited',  errorDetail: 'Too many requests to the proxy (HTTP 429)' }
+  if (status >= 400 && status < 500) return { error: `Error ${status}`, errorDetail: `Proxy returned client error HTTP ${status}` }
+  if (status >= 500) return { error: 'Server Error',   errorDetail: `Proxy server returned HTTP ${status}` }
+  return { error: `HTTP ${status}`, errorDetail: `Unexpected HTTP status ${status}` }
 }
 
 type Protocol = 'http' | 'socks4' | 'socks5'
@@ -101,12 +140,11 @@ export async function testProxy(
   ])
 
   if (ipResult.status === 'rejected') {
-    const msg = ipResult.reason instanceof Error ? ipResult.reason.message : 'Unknown error'
-    return { ok: false, error: msg.toLowerCase().includes('timeout') || msg.includes('abort') ? 'Timeout' : msg }
+    return { ok: false, ...categorizeError(ipResult.reason) }
   }
 
   const ipResp = ipResult.value
-  if (!ipResp.ok) return { ok: false, error: `HTTP ${ipResp.status}` }
+  if (!ipResp.ok) return { ok: false, ...categorizeHttpError(ipResp.status) }
 
   const data = await ipResp.json() as IpApiResponse
   if (data.status !== 'success' || !data.query) return { ok: false, error: 'IP lookup failed' }

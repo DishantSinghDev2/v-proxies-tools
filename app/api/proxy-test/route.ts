@@ -115,7 +115,10 @@ async function testWithCfSockets(
 
   if (ipResult.status === 'rejected') throw ipResult.reason
   const { status, body, ms } = ipResult.value
-  if (status !== 200) throw new Error(`HTTP ${status}`)
+  if (status === 407) throw Object.assign(new Error('Auth Required'), { errorDetail: 'Proxy requires authentication (HTTP 407) — add username and password' })
+  if (status === 401) throw Object.assign(new Error('Unauthorized'),  { errorDetail: 'Invalid proxy credentials (HTTP 401)' })
+  if (status === 403) throw Object.assign(new Error('Forbidden'),     { errorDetail: 'Proxy refused the request (HTTP 403)' })
+  if (status !== 200) throw Object.assign(new Error(`HTTP ${status}`), { errorDetail: `Proxy returned unexpected HTTP ${status}` })
 
   const data = JSON.parse(body) as IpApiResponse
   if (data.status !== 'success' || !data.query) throw new Error('IP lookup failed')
@@ -216,7 +219,13 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(result)
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
-    const isTimeout = msg.toLowerCase().includes('timeout') || msg.includes('abort')
-    return NextResponse.json({ ok: false, error: isTimeout ? 'Timeout' : msg })
+    const detail = (err as { errorDetail?: string }).errorDetail
+    const lmsg = msg.toLowerCase()
+    const isTimeout = lmsg.includes('timeout') || lmsg.includes('abort')
+    return NextResponse.json({
+      ok: false,
+      error: isTimeout ? 'Timeout' : msg,
+      errorDetail: detail ?? (isTimeout ? 'Proxy did not respond within the timeout period' : undefined),
+    })
   }
 }

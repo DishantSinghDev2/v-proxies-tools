@@ -68,6 +68,7 @@ interface ProxyResult {
   city?: string
   isp?: string
   error?: string
+  errorDetail?: string
 }
 
 function parseProxy(line: string): ParsedProxy | null {
@@ -454,7 +455,12 @@ export default function ProxyTesterTool() {
                 </div>
               )}
               {sResult.status === 'dead' && (
-                <p className="text-sm text-[#ef4444] font-mono">{sResult.error ?? 'Connection failed'}</p>
+                <div>
+                  <p className="text-sm text-[#ef4444] font-mono font-semibold">{sResult.error ?? 'Dead'}</p>
+                  {sResult.errorDetail && (
+                    <p className="text-xs text-[#6b7280] mt-1">{sResult.errorDetail}</p>
+                  )}
+                </div>
               )}
             </div>
           )}
@@ -625,7 +631,18 @@ export default function ProxyTesterTool() {
                                   : '#2a2a2a',
                               }}
                             />
-                            {r.status === 'testing' ? 'Testing' : r.status === 'alive' ? 'Alive' : r.status === 'dead' ? 'Dead' : '—'}
+                            {r.status === 'testing' ? 'Testing'
+                              : r.status === 'alive' ? 'Alive'
+                              : r.status === 'dead' ? (
+                                r.errorDetail ? (
+                                  <span className="relative group cursor-help">
+                                    <span className="underline decoration-dotted underline-offset-2">{r.error ?? 'Dead'}</span>
+                                    <span className="pointer-events-none absolute bottom-full left-0 mb-1.5 z-20 w-56 rounded-lg border border-[#2a2a2a] bg-[#111] p-2.5 text-[11px] font-sans leading-relaxed text-[#9ca3af] opacity-0 group-hover:opacity-100 transition-opacity shadow-xl">
+                                      {r.errorDetail}
+                                    </span>
+                                  </span>
+                                ) : (r.error ?? 'Dead')
+                              ) : '—'}
                           </span>
                         </td>
                         <td className="px-3 py-2.5 font-mono text-xs text-white">{r.ip ?? '—'}</td>
