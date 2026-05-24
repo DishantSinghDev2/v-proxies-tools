@@ -6,12 +6,12 @@ export type Protocol = 'http' | 'socks4' | 'socks5'
 
 interface IpApiResponse {
   status: string
+  query?: string
   country?: string
   countryCode?: string
   city?: string
   regionName?: string
   isp?: string
-  org?: string
 }
 
 export interface TestResult {
@@ -29,9 +29,7 @@ export interface TestResult {
 }
 
 function getJudgeUrl(): string {
-  if (process.env.JUDGE_URL) return process.env.JUDGE_URL
-  if (process.env.RENDER_EXTERNAL_URL) return `${process.env.RENDER_EXTERNAL_URL}/api/proxy-judge`
-  return 'http://localhost:3000/api/proxy-judge'
+  return process.env.JUDGE_URL ?? 'https://tools.v-proxies.com/api/proxy-judge'
 }
 
 function getErrnoCode(err: unknown): string | undefined {
@@ -123,56 +121,63 @@ export async function testProxy(
   protocol: Protocol = 'http',
 ): Promise<TestResult> {
   const dispatcher = createDispatcher(host, port, protocol, username, password)
+  const anonTimeout = Math.min(timeoutMs, 5000)
   const judgeUrl = getJudgeUrl()
+
   const start = Date.now()
+  let ms = 0
 
-  // Step 1: single request through the proxy → exit IP + request headers
-  let judgeData: { ip: string; headers: Record<string, string> }
-  let ms: number
-  try {
-    const resp = await proxyFetch(dispatcher, judgeUrl, timeoutMs)
-    ms = Date.now() - start
-    if (!resp.ok) return { ok: false, ...categorizeHttpError(resp.status) }
-    judgeData = await resp.json() as { ip: string; headers: Record<string, string> }
-    if (!judgeData.ip || judgeData.ip === 'unknown') {
-      return { ok: false, error: 'IP lookup failed', errorDetail: 'Proxy connected but exit IP could not be determined' }
-    }
-  } catch (err) {
-    return { ok: false, ...categorizeError(err) }
+  // Primary: ip-api.com through the proxy → exit IP + geo + ISP + latency
+  // Anonymity: our judge first, httpbin/postman-echo as fallbacks
+  const [ipSettled, anonResp] = await Promise.all([
+    Promise.allSettled([
+      proxyFetch(dispatcher, 'http://ip-api.com/json', timeoutMs)
+        .then(r => { ms = Date.now() - start; return r }),
+    ]).then(([r]) => r),
+    Promise.any([
+      proxyFetch(dispatcher, judgeUrl, anonTimeout),
+      proxyFetch(dispatcher, 'http://httpbin.org/headers', anonTimeout),
+      proxyFetch(dispatcher, 'http://postman-echo.com/headers', anonTimeout),
+    ]).catch(() => null),
+  ])
+
+  if (ipSettled.status === 'rejected') {
+    return { ok: false, ...categorizeError(ipSettled.reason) }
   }
 
-  const { ip, headers } = judgeData
+  const ipResp = ipSettled.value
+  if (!ipResp.ok) return { ok: false, ...categorizeHttpError(ipResp.status) }
 
-  // Step 2: geo + ISP lookup from our server directly (not through the proxy)
-  // ip-api.com called with a specific IP is much more reliable than calling through a proxy
-  let country = '', countryCode = '', city = '', region = '', isp = ''
-  try {
-    const geoResp = await uFetch(
-      `http://ip-api.com/json/${ip}?fields=country,countryCode,city,regionName,isp,org`,
-      { signal: AbortSignal.timeout(4000) },
-    )
-    if (geoResp.ok) {
-      const geo = await geoResp.json() as IpApiResponse
-      if (geo.status === 'success') {
-        country     = geo.country     ?? ''
-        countryCode = geo.countryCode ?? ''
-        city        = geo.city        ?? ''
-        region      = geo.regionName  ?? ''
-        isp         = geo.isp || geo.org || ''
-      }
-    }
-  } catch { /* non-critical — proxy is alive even if geo fails */ }
+  const data = await ipResp.json() as IpApiResponse
+  if (data.status !== 'success' || !data.query) {
+    return { ok: false, error: 'IP lookup failed', errorDetail: 'Connected to proxy but IP lookup returned an unexpected response' }
+  }
 
-  // Step 3: anonymity from the headers the proxy forwarded to us
-  const headerKeys = Object.keys(headers).map(k => k.toLowerCase())
+  // Anonymity from headers — works for both our judge ({ip, headers}) and httpbin/postman-echo ({headers})
   let anonymity: 'elite' | 'anonymous' | 'transparent' | 'unknown' = 'unknown'
-  if (headerKeys.some(k => ['x-forwarded-for', 'x-real-ip', 'forwarded', 'client-ip'].includes(k))) {
-    anonymity = 'transparent'
-  } else if (headerKeys.some(k => k === 'via' || k.startsWith('proxy-') || k === 'x-proxy-id')) {
-    anonymity = 'anonymous'
-  } else {
-    anonymity = 'elite'
+  if (anonResp?.ok) {
+    try {
+      const anonData = await anonResp.json() as { headers?: Record<string, string> }
+      const keys = Object.keys(anonData.headers ?? {}).map(k => k.toLowerCase())
+      if (keys.some(k => ['x-forwarded-for', 'x-real-ip', 'forwarded', 'client-ip'].includes(k))) {
+        anonymity = 'transparent'
+      } else if (keys.some(k => k === 'via' || k.startsWith('proxy-') || k === 'x-proxy-id')) {
+        anonymity = 'anonymous'
+      } else {
+        anonymity = 'elite'
+      }
+    } catch { /* best-effort */ }
   }
 
-  return { ok: true, ip, ms, anonymity, country, countryCode, city, region, isp }
+  return {
+    ok: true,
+    ip: data.query,
+    ms,
+    anonymity,
+    country: data.country ?? data.countryCode ?? '',
+    countryCode: data.countryCode ?? '',
+    city: data.city ?? '',
+    region: data.regionName ?? '',
+    isp: data.isp ?? '',
+  }
 }
