@@ -182,7 +182,7 @@ export default function ProxyTesterTool() {
   }, [])
 
   const buildBody = useCallback(async (
-    proxy: { host: string; port: number; username?: string; password?: string },
+    proxy: { host: string; port: number; username?: string; password?: string; protocol: Protocol },
   ) => {
     if (serverPubKeyRef.current) {
       return await encryptForServer(proxy, serverPubKeyRef.current)
@@ -200,6 +200,7 @@ export default function ProxyTesterTool() {
         port: parseInt(sPort),
         username: sUser || undefined,
         password: sPass || undefined,
+        protocol: sProto,
       })
       const res = await fetch('/api/proxy-test', {
         method: 'POST',
@@ -248,6 +249,7 @@ export default function ProxyTesterTool() {
             port: proxy.port,
             username: proxy.username,
             password: proxy.password,
+            protocol: proxy.protocol,
           })
           const res = await fetch('/api/proxy-test', {
             method: 'POST',

@@ -1,4 +1,6 @@
-import { ProxyAgent, fetch as uFetch } from 'undici'
+import { Agent, ProxyAgent, fetch as uFetch } from 'undici'
+import { SocksClient } from 'socks'
+import type { Socket } from 'node:net'
 
 interface IpApiResponse {
   status: string
@@ -22,10 +24,56 @@ export interface TestResult {
   error?: string
 }
 
-async function proxyFetch(proxyUrl: string, targetUrl: string, timeoutMs: number) {
-  const agent = new ProxyAgent({ uri: proxyUrl })
+type Protocol = 'http' | 'socks4' | 'socks5'
+
+function createDispatcher(
+  host: string,
+  port: number,
+  protocol: Protocol,
+  username?: string,
+  password?: string,
+) {
+  if (protocol === 'socks4' || protocol === 'socks5') {
+    const socksType = protocol === 'socks4' ? 4 : 5
+    return new Agent({
+      connect: async (options, callback) => {
+        try {
+          const { socket } = await SocksClient.createConnection({
+            proxy: {
+              host,
+              port,
+              type: socksType,
+              userId: username,
+              password: protocol === 'socks5' ? password : undefined,
+            },
+            command: 'connect',
+            destination: {
+              host: options.hostname!,
+              port: typeof options.port === 'string' ? parseInt(options.port) : (options.port ?? 80),
+            },
+          })
+          callback(null, socket as Socket)
+        } catch (err) {
+          callback(err as Error, null)
+        }
+      },
+    })
+  }
+
+  // HTTP proxy
+  const auth = username && password
+    ? `${encodeURIComponent(username)}:${encodeURIComponent(password)}@`
+    : ''
+  return new ProxyAgent({ uri: `http://${auth}${host}:${port}` })
+}
+
+async function proxyFetch(
+  dispatcher: Agent | ProxyAgent,
+  targetUrl: string,
+  timeoutMs: number,
+) {
   return uFetch(targetUrl, {
-    dispatcher: agent,
+    dispatcher,
     signal: AbortSignal.timeout(timeoutMs),
   })
 }
@@ -36,23 +84,20 @@ export async function testProxy(
   username: string | undefined,
   password: string | undefined,
   timeoutMs: number,
+  protocol: Protocol = 'http',
 ): Promise<TestResult> {
-  const auth = username && password
-    ? `${encodeURIComponent(username)}:${encodeURIComponent(password)}@`
-    : ''
-  const proxyUrl = `http://${auth}${host}:${port}`
+  const dispatcher = createDispatcher(host, port, protocol, username, password)
 
-  // Measure latency from ip-api.com only — httpbin.org is a free service and can be slow
   let ms = 0
   const start = Date.now()
-  const ipPromise = proxyFetch(proxyUrl, 'http://ip-api.com/json', timeoutMs).then(r => {
+  const ipPromise = proxyFetch(dispatcher, 'http://ip-api.com/json', timeoutMs).then(r => {
     ms = Date.now() - start
     return r
   })
 
   const [ipResult, anonResult] = await Promise.allSettled([
     ipPromise,
-    proxyFetch(proxyUrl, 'http://httpbin.org/headers', Math.min(timeoutMs, 8000)),
+    proxyFetch(dispatcher, 'http://httpbin.org/headers', Math.min(timeoutMs, 8000)),
   ])
 
   if (ipResult.status === 'rejected') {

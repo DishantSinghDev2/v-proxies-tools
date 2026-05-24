@@ -66,17 +66,17 @@ fastify.post<{ Body: TestBody }>('/test', {
     return reply.code(400).send({ ok: false, error: 'Decryption failed' })
   }
 
-  let parsed: { host: string; port: number; username?: string; password?: string }
+  let parsed: { host: string; port: number; username?: string; password?: string; protocol?: 'http' | 'socks4' | 'socks5' }
   try {
     parsed = JSON.parse(plaintext) as typeof parsed
   } catch {
     return reply.code(400).send({ ok: false, error: 'Invalid payload' })
   }
 
-  const { host, port, username, password } = parsed
+  const { host, port, username, password, protocol = 'http' } = parsed
   if (!host || !port) return reply.code(400).send({ ok: false, error: 'Missing host or port' })
 
-  return testProxy(host, port, username, password, timeout)
+  return testProxy(host, port, username, password, timeout, protocol)
 })
 
 await fastify.listen({ port: parseInt(PORT, 10), host: '0.0.0.0' })

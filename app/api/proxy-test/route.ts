@@ -152,6 +152,7 @@ export async function POST(req: NextRequest) {
   let input: {
     epk?: string; iv?: string; ct?: string
     host?: string; port?: number; username?: string; password?: string
+    protocol?: 'http' | 'socks4' | 'socks5'
     timeout?: number
   }
   try {
@@ -195,6 +196,10 @@ export async function POST(req: NextRequest) {
       host = h
       port = p
       proxyAuth = username && password ? `${username}:${password}` : ''
+      // SOCKS proxies not supported in CF fallback — backend handles them
+      if (input.protocol && input.protocol !== 'http') {
+        return NextResponse.json({ ok: false, error: 'SOCKS proxies require the Node.js backend to be configured' })
+      }
     } catch {
       return NextResponse.json({ ok: false, error: 'Decryption failed' }, { status: 400 })
     }

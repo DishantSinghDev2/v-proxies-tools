@@ -3,6 +3,7 @@ export interface DecryptedProxy {
   port: number
   username?: string
   password?: string
+  protocol?: 'http' | 'socks4' | 'socks5'
 }
 
 export async function decryptPayload(
