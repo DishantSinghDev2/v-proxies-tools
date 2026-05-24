@@ -13,7 +13,7 @@ NEXT_PUBLIC_SITE_URL = "https://tools.vproxies.app"
 ECDH_PUBLIC_KEY_B64 = "BLuFeYt8WfSlxT5ACIQglasG0To7g2E1OPZ+37UzoJRbyk4YIW+rPOlMMAeMxD+eNeI9NRoTvTTNi8iwl6K3Fp4="
 
 # Node.js backend URL (optional — CF Worker is the fallback when not set)
-# PROXY_BACKEND_URL = "https://your-backend.example.com"
+PROXY_BACKEND_URL = "https://v-proxies-backend.onrender.com"
 
 # Secrets — set via `wrangler secret put <NAME>` (never put real values here)
 # PROXY_BACKEND_TOKEN = "<bearer-token-matching-backend-BACKEND_TOKEN>"
