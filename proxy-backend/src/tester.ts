@@ -1,4 +1,4 @@
-import { ProxyAgent, fetch as uFetch, type Response as UResponse } from 'undici'
+import { ProxyAgent, fetch as uFetch } from 'undici'
 
 interface IpApiResponse {
   status: string
@@ -22,12 +22,12 @@ export interface TestResult {
   error?: string
 }
 
-async function proxyFetch(proxyUrl: string, targetUrl: string, timeoutMs: number): Promise<UResponse> {
-  const agent = new ProxyAgent({ uri: proxyUrl, connectTimeout: timeoutMs, headersTimeout: timeoutMs })
+async function proxyFetch(proxyUrl: string, targetUrl: string, timeoutMs: number) {
+  const agent = new ProxyAgent({ uri: proxyUrl })
   return uFetch(targetUrl, {
     dispatcher: agent,
     signal: AbortSignal.timeout(timeoutMs),
-  }) as unknown as UResponse
+  })
 }
 
 export async function testProxy(
@@ -41,10 +41,17 @@ export async function testProxy(
     ? `${encodeURIComponent(username)}:${encodeURIComponent(password)}@`
     : ''
   const proxyUrl = `http://${auth}${host}:${port}`
+
+  // Measure latency from ip-api.com only — httpbin.org is a free service and can be slow
+  let ms = 0
   const start = Date.now()
+  const ipPromise = proxyFetch(proxyUrl, 'http://ip-api.com/json', timeoutMs).then(r => {
+    ms = Date.now() - start
+    return r
+  })
 
   const [ipResult, anonResult] = await Promise.allSettled([
-    proxyFetch(proxyUrl, 'http://ip-api.com/json', timeoutMs),
+    ipPromise,
     proxyFetch(proxyUrl, 'http://httpbin.org/headers', Math.min(timeoutMs, 8000)),
   ])
 
@@ -53,7 +60,6 @@ export async function testProxy(
     return { ok: false, error: msg.toLowerCase().includes('timeout') || msg.includes('abort') ? 'Timeout' : msg }
   }
 
-  const ms = Date.now() - start
   const ipResp = ipResult.value
   if (!ipResp.ok) return { ok: false, error: `HTTP ${ipResp.status}` }
 
