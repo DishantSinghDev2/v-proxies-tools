@@ -1,165 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server'
-import type { Socket } from 'cloudflare:sockets'
 import { decryptPayload } from '@/app/lib/crypto'
+import { testProxy } from '@/app/lib/tester'
+import type { Protocol } from '@/app/lib/tester'
 
 export const runtime = 'nodejs'
-
-async function cfConnect(hostname: string, port: number): Promise<Socket> {
-  const mod = await import(
-    /* webpackIgnore: true */
-    /* turbopackIgnore: true */
-    'cloudflare:sockets'
-  ) as { connect: (address: { hostname: string; port: number }) => Socket }
-  return mod.connect({ hostname, port })
-}
-
-interface IpApiResponse {
-  status: string
-  query?: string
-  countryCode?: string
-  city?: string
-  regionName?: string
-  isp?: string
-}
-
-function buildProxyRequest(targetHost: string, targetPath: string, proxyAuth: string): Uint8Array {
-  const lines = [
-    `GET http://${targetHost}${targetPath} HTTP/1.1`,
-    `Host: ${targetHost}`,
-    ...(proxyAuth ? [`Proxy-Authorization: Basic ${btoa(proxyAuth)}`] : []),
-    'User-Agent: curl/8.0',
-    'Accept: application/json',
-    'Accept-Encoding: identity',
-    'Connection: close',
-    '',
-    '',
-  ]
-  return new TextEncoder().encode(lines.join('\r\n'))
-}
-
-function decodeChunked(body: string): string {
-  let result = ''
-  let pos = 0
-  while (pos < body.length) {
-    const lineEnd = body.indexOf('\r\n', pos)
-    if (lineEnd === -1) break
-    const size = parseInt(body.slice(pos, lineEnd), 16)
-    if (isNaN(size) || size === 0) break
-    result += body.slice(lineEnd + 2, lineEnd + 2 + size)
-    pos = lineEnd + 2 + size + 2
-  }
-  return result
-}
-
-function parseHttpResponse(raw: string): { status: number; body: string } {
-  const sep = raw.indexOf('\r\n\r\n')
-  if (sep === -1) throw new Error('Malformed HTTP response')
-  const headerSection = raw.slice(0, sep)
-  let body = raw.slice(sep + 4)
-  const status = parseInt(headerSection.split('\r\n')[0].split(' ')[1] ?? '0', 10)
-  if (headerSection.toLowerCase().includes('transfer-encoding: chunked')) {
-    body = decodeChunked(body)
-  }
-  return { status, body }
-}
-
-async function proxyFetch(
-  proxyHost: string,
-  proxyPort: number,
-  targetHost: string,
-  targetPath: string,
-  proxyAuth: string,
-  timeoutMs: number,
-): Promise<{ status: number; body: string; ms: number }> {
-  const socket = await cfConnect(proxyHost, proxyPort)
-  const writer = socket.writable.getWriter()
-  const reader = socket.readable.getReader()
-  const start = Date.now()
-
-  await writer.write(buildProxyRequest(targetHost, targetPath, proxyAuth))
-  writer.releaseLock()
-
-  const decoder = new TextDecoder()
-  let raw = ''
-  const deadline = Date.now() + timeoutMs
-
-  while (true) {
-    const remaining = deadline - Date.now()
-    if (remaining <= 0) throw new Error('Timeout')
-    const result = await Promise.race([
-      reader.read() as Promise<{ done: boolean; value?: Uint8Array }>,
-      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('Timeout')), remaining)),
-    ])
-    if (result.done) break
-    if (result.value) raw += decoder.decode(result.value, { stream: true })
-  }
-
-  reader.releaseLock()
-  socket.close()
-
-  const { status, body } = parseHttpResponse(raw)
-  return { status, body, ms: Date.now() - start }
-}
-
-async function testWithCfSockets(
-  host: string,
-  port: number,
-  proxyAuth: string,
-  timeout: number,
-) {
-  const anonTimeout = Math.min(timeout, 5000)
-  const [ipResult, anonResult] = await Promise.allSettled([
-    proxyFetch(host, port, 'ip-api.com', '/json', proxyAuth, timeout),
-    // Race two judge services — whichever responds first wins
-    Promise.any([
-      proxyFetch(host, port, 'httpbin.org', '/headers', proxyAuth, anonTimeout),
-      proxyFetch(host, port, 'postman-echo.com', '/headers', proxyAuth, anonTimeout),
-    ]),
-  ])
-
-  if (ipResult.status === 'rejected') throw ipResult.reason
-  const { status, body, ms } = ipResult.value
-  if (status === 407) throw Object.assign(new Error('Auth Required'), { errorDetail: 'Proxy requires authentication (HTTP 407) — add username and password' })
-  if (status === 401) throw Object.assign(new Error('Unauthorized'),  { errorDetail: 'Invalid proxy credentials (HTTP 401)' })
-  if (status === 403) throw Object.assign(new Error('Forbidden'),     { errorDetail: 'Proxy refused the request (HTTP 403)' })
-  if (status !== 200) throw Object.assign(new Error(`HTTP ${status}`), { errorDetail: `Proxy returned unexpected HTTP ${status}` })
-
-  const data = JSON.parse(body) as IpApiResponse
-  if (data.status !== 'success' || !data.query) throw new Error('IP lookup failed')
-
-  let anonymity: 'elite' | 'anonymous' | 'transparent' | 'unknown' = 'unknown'
-  if (anonResult.status === 'fulfilled') {
-    try {
-      const anonData = JSON.parse(anonResult.value.body) as { headers?: Record<string, string> }
-      const keys = Object.keys(anonData.headers ?? {}).map(k => k.toLowerCase())
-      if (keys.some(k => ['x-forwarded-for', 'x-real-ip', 'forwarded'].includes(k))) {
-        anonymity = 'transparent'
-      } else if (keys.some(k => k === 'via' || k.startsWith('proxy-') || k === 'x-proxy-id')) {
-        anonymity = 'anonymous'
-      } else {
-        anonymity = 'elite'
-      }
-    } catch { /* best-effort */ }
-  }
-
-  return {
-    ok: true,
-    ip: data.query,
-    ms,
-    anonymity,
-    country: data.countryCode,
-    countryCode: data.countryCode,
-    city: data.city,
-    region: data.regionName,
-    isp: data.isp ?? '',
-  }
-}
 
 export async function POST(req: NextRequest) {
   let input: {
     epk?: string; iv?: string; ct?: string
     host?: string; port?: number; username?: string; password?: string
-    protocol?: 'http' | 'socks4' | 'socks5'
+    protocol?: Protocol
     timeout?: number
   }
   try {
@@ -171,25 +21,11 @@ export async function POST(req: NextRequest) {
   const { timeout = 15000 } = input
   const isEncrypted = input.epk && input.iv && input.ct
 
-  // Forward to Node.js backend if configured (preferred path)
-  const backendUrl = process.env.PROXY_BACKEND_URL
-  const backendToken = process.env.PROXY_BACKEND_TOKEN
-  if (backendUrl && backendToken && isEncrypted) {
-    try {
-      const backendRes = await fetch(`${backendUrl}/test`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${backendToken}` },
-        body: JSON.stringify({ epk: input.epk, iv: input.iv, ct: input.ct, timeout }),
-        signal: AbortSignal.timeout(timeout + 3000),
-      })
-      if (backendRes.ok) {
-        return NextResponse.json(await backendRes.json())
-      }
-    } catch { /* fall through to CF Worker fallback */ }
-  }
-
-  // Resolve credentials (CF Worker fallback or local dev plaintext)
-  let host: string, port: number, proxyAuth: string
+  let host: string
+  let port: number
+  let username: string | undefined
+  let password: string | undefined
+  let protocol: Protocol = 'http'
 
   if (isEncrypted) {
     const privKeyJwk = process.env.ECDH_PRIVATE_KEY_JWK
@@ -197,39 +33,25 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'Encryption key not configured' }, { status: 503 })
     }
     try {
-      const { host: h, port: p, username, password } = await decryptPayload(
-        input.epk!, input.iv!, input.ct!, privKeyJwk,
-      )
-      host = h
-      port = p
-      proxyAuth = username && password ? `${username}:${password}` : ''
-      // SOCKS proxies not supported in CF fallback — backend handles them
-      if (input.protocol && input.protocol !== 'http') {
-        return NextResponse.json({ ok: false, error: 'SOCKS proxies require the Node.js backend to be configured' })
-      }
+      const decrypted = await decryptPayload(input.epk!, input.iv!, input.ct!, privKeyJwk)
+      host = decrypted.host
+      port = decrypted.port
+      username = decrypted.username
+      password = decrypted.password
+      protocol = decrypted.protocol ?? 'http'
     } catch {
       return NextResponse.json({ ok: false, error: 'Decryption failed' }, { status: 400 })
     }
   } else if (input.host && input.port) {
     host = input.host
     port = input.port
-    proxyAuth = input.username && input.password ? `${input.username}:${input.password}` : ''
+    username = input.username
+    password = input.password
+    protocol = input.protocol ?? 'http'
   } else {
     return NextResponse.json({ ok: false, error: 'Missing required fields' }, { status: 400 })
   }
 
-  try {
-    const result = await testWithCfSockets(host, port, proxyAuth, timeout)
-    return NextResponse.json(result)
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Unknown error'
-    const detail = (err as { errorDetail?: string }).errorDetail
-    const lmsg = msg.toLowerCase()
-    const isTimeout = lmsg.includes('timeout') || lmsg.includes('abort')
-    return NextResponse.json({
-      ok: false,
-      error: isTimeout ? 'Timeout' : msg,
-      errorDetail: detail ?? (isTimeout ? 'Proxy did not respond within the timeout period' : undefined),
-    })
-  }
+  const result = await testProxy(host, port, username, password, timeout, protocol)
+  return NextResponse.json(result)
 }

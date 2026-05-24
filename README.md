@@ -16,7 +16,7 @@
     <img src="https://img.shields.io/badge/open%20source-MIT-22c55e?style=flat-square" alt="Open Source" />
   </a>
   <img src="https://img.shields.io/badge/Next.js-16-black?style=flat-square&logo=next.js" alt="Next.js" />
-  <img src="https://img.shields.io/badge/Cloudflare-Workers-F38020?style=flat-square&logo=cloudflare&logoColor=white" alt="Cloudflare Workers" />
+  <img src="https://img.shields.io/badge/Render-Node.js-46E3B7?style=flat-square&logo=render&logoColor=white" alt="Render" />
 </p>
 
 ---
@@ -101,16 +101,16 @@ The key pair is generated once by the operator (`npm run generate-keys` in `prox
 ## Architecture
 
 ```
-                    ┌─────────────────────────────────────────┐
-                    │          Cloudflare Worker               │
-Browser  ──HTTPS──► │  /api/proxy-test                         │
-(encrypted blob)    │    1. Try Node.js backend  ──HTTP──►  Node.js Backend
-                    │    2. Fallback: decrypt +                │  (Fastify + undici)
-                    │       cloudflare:sockets                 │
-                    └─────────────────────────────────────────┘
+Browser  ──HTTPS──►  Next.js on Render (Node.js)
+(encrypted blob)       /api/proxy-test
+                         Decrypt in memory → testProxy()
+                         undici ProxyAgent / SOCKS
+                              │
+                              ▼
+                        ip-api.com  +  httpbin.org / postman-echo.com
 ```
 
-The **Node.js backend** (`proxy-backend/`) is optional but recommended for production — it uses `undici`'s `ProxyAgent` for more reliable proxy handling and keeps the Cloudflare Worker as a hot standby. Both share the same ECDH keypair.
+Everything runs in a single Next.js app deployed on Render. No separate services, no edge runtime.
 
 ---
 
@@ -148,23 +148,32 @@ Or use the combined command:
 npm run deploy
 ```
 
-### Deploy the Node.js backend (recommended)
+### Deploy to Render
 
-See [`proxy-backend/README.md`](proxy-backend/README.md) for full instructions. Short version:
+1. Create a new **Web Service** on [render.com](https://render.com), connect this repo
+2. Set **Root Directory** to ` ` (repo root)
+3. **Build command:** `npm install && npm run build`
+4. **Start command:** `npm run start`
+5. Add environment variables:
+   - `ECDH_PRIVATE_KEY_JWK` — from key generation below
+   - `ECDH_PUBLIC_KEY_B64` — from key generation below
+
+### Generate encryption keys
 
 ```bash
-cd proxy-backend
-npm install
-npm run generate-keys   # generate ECDH keypair — follow the printed instructions
-cp .env.example .env    # fill in the generated keys + a random BACKEND_TOKEN
-docker compose up -d    # start on your server
+node -e "
+const { webcrypto } = require('node:crypto');
+(async () => {
+  const pair = await webcrypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey']);
+  const priv = await webcrypto.subtle.exportKey('jwk', pair.privateKey);
+  const pub = await webcrypto.subtle.exportKey('raw', pair.publicKey);
+  console.log('ECDH_PRIVATE_KEY_JWK=' + JSON.stringify(JSON.stringify(priv)));
+  console.log('ECDH_PUBLIC_KEY_B64=' + Buffer.from(pub).toString('base64'));
+})();
+"
 ```
 
-Then add to `wrangler.toml` / `wrangler secret put`:
-- `ECDH_PUBLIC_KEY_B64` — in `[vars]`
-- `PROXY_BACKEND_URL` — in `[vars]`
-- `PROXY_BACKEND_TOKEN` — secret
-- `ECDH_PRIVATE_KEY_JWK` — secret (for CF fallback decryption)
+Add both values to Render's environment variables.
 
 ---
 
@@ -173,13 +182,12 @@ Then add to `wrangler.toml` / `wrangler secret put`:
 | | |
 |---|---|
 | Framework | [Next.js 16](https://nextjs.org) (App Router) |
-| Adapter | [OpenNext for Cloudflare](https://opennext.js.org/cloudflare) |
-| CF Runtime | [Cloudflare Workers](https://workers.cloudflare.com) + `cloudflare:sockets` |
-| Backend | [Fastify](https://fastify.dev) + [undici](https://undici.nodejs.org) (Node.js 22) |
-| Encryption | ECDH P-256 + AES-256-GCM (Web Crypto API — browser, CF, Node.js) |
+| Runtime | Node.js 18+ on [Render](https://render.com) |
+| Proxy testing | [undici](https://undici.nodejs.org) `ProxyAgent` + [socks](https://github.com/JoshGlazebrook/socks) |
+| Encryption | ECDH P-256 + AES-256-GCM (Web Crypto API) |
 | Styling | Tailwind CSS v4 |
 | IP Geo | [ip-api.com](https://ip-api.com) |
-| Anonymity check | [httpbin.org](https://httpbin.org/headers) |
+| Anonymity check | [httpbin.org](https://httpbin.org/headers) + [postman-echo.com](https://postman-echo.com/headers) |
 
 ---
 
@@ -191,31 +199,19 @@ app/
   layout.tsx                      # nav, footer, metadata
   globals.css
   lib/
-    crypto.ts                     # AES-256-GCM decryption (CF Worker / Node runtime)
+    crypto.ts                     # ECDH + AES-256-GCM decryption
+    tester.ts                     # proxy testing (undici ProxyAgent + SOCKS)
   api/
     public-key/route.ts           # serves the ECDH public key to the browser
-    proxy-test/route.ts           # proxy test endpoint — backend forward + CF fallback
+    proxy-test/route.ts           # proxy test endpoint
     proxy-judge/route.ts          # header mirror for anonymity detection
   tools/
     proxy-tester/
       page.tsx                    # SEO page wrapper + FAQ
       ProxyTesterTool.tsx         # bulk + single tester UI (client-side encryption)
-proxy-backend/
-  src/
-    index.ts                      # Fastify server
-    crypto.ts                     # ECDH key loading + AES-256-GCM decryption
-    tester.ts                     # proxy testing with undici ProxyAgent
-  scripts/
-    generate-keys.mjs             # one-shot ECDH keypair generator
-  Dockerfile
-  docker-compose.yml
-  README.md
 public/
   logo.svg
-scripts/
-  patch-cf-sockets.mjs            # postbuild patch for cloudflare:sockets imports
-wrangler.toml
-open-next.config.ts
+next.config.ts
 ```
 
 ---
@@ -223,18 +219,9 @@ open-next.config.ts
 ## Scripts
 
 ```bash
-# Next.js app
-npm run dev            # local dev server (Next.js, Turbopack)
-npm run build          # Next.js production build
-npm run build:worker   # full Cloudflare Workers build (Next + OpenNext)
-npm run preview        # build + run with wrangler dev
-npm run deploy         # build + wrangler deploy
-
-# Node.js backend (run from proxy-backend/)
-npm run generate-keys  # generate ECDH keypair
-npm run dev            # local dev with hot reload
-npm run build          # compile TypeScript
-npm run start          # run compiled output
+npm run dev      # local dev server (Next.js, Turbopack)
+npm run build    # production build
+npm run start    # start production server
 ```
 
 ---

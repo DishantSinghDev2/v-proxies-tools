@@ -2,6 +2,8 @@ import { Agent, ProxyAgent, fetch as uFetch } from 'undici'
 import { SocksClient } from 'socks'
 import type { Socket } from 'node:net'
 
+export type Protocol = 'http' | 'socks4' | 'socks5'
+
 interface IpApiResponse {
   status: string
   query?: string
@@ -29,7 +31,6 @@ function getErrnoCode(err: unknown): string | undefined {
   if (!(err instanceof Error)) return undefined
   const code = (err as NodeJS.ErrnoException).code
   if (code) return code
-  // undici wraps network errors inside err.cause
   const cause = (err as { cause?: unknown }).cause
   if (cause instanceof Error) return (cause as NodeJS.ErrnoException).code
   return undefined
@@ -40,15 +41,15 @@ function categorizeError(err: unknown): { error: string; errorDetail: string } {
   const msg = err instanceof Error ? err.message : String(err)
   const lmsg = msg.toLowerCase()
 
-  if (code === 'ECONNREFUSED')  return { error: 'Refused',      errorDetail: 'Connection refused — proxy port is closed or server is offline' }
-  if (code === 'ENOTFOUND')     return { error: 'DNS Failed',   errorDetail: `Could not resolve proxy hostname` }
-  if (code === 'ECONNRESET')    return { error: 'Reset',        errorDetail: 'Connection was reset by the proxy server' }
+  if (code === 'ECONNREFUSED')  return { error: 'Refused',     errorDetail: 'Connection refused — proxy port is closed or server is offline' }
+  if (code === 'ENOTFOUND')     return { error: 'DNS Failed',  errorDetail: 'Could not resolve proxy hostname' }
+  if (code === 'ECONNRESET')    return { error: 'Reset',       errorDetail: 'Connection was reset by the proxy server' }
   if (code === 'ENETUNREACH' || code === 'EHOSTUNREACH')
-                                return { error: 'Unreachable',  errorDetail: 'Network or host unreachable' }
-  if (code === 'ECONNABORTED')  return { error: 'Aborted',      errorDetail: 'Connection was aborted' }
+                                return { error: 'Unreachable', errorDetail: 'Network or host unreachable' }
+  if (code === 'ECONNABORTED')  return { error: 'Aborted',     errorDetail: 'Connection was aborted' }
   if (lmsg.includes('timeout') || lmsg.includes('abort') || code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT')
-                                return { error: 'Timeout',      errorDetail: 'Proxy did not respond within the timeout period' }
-  if (lmsg.includes('socks'))   return { error: 'SOCKS Error',  errorDetail: msg }
+                                return { error: 'Timeout',     errorDetail: 'Proxy did not respond within the timeout period' }
+  if (lmsg.includes('socks'))   return { error: 'SOCKS Error', errorDetail: msg }
 
   return { error: 'Failed', errorDetail: msg }
 }
@@ -63,15 +64,13 @@ function categorizeHttpError(status: number): { error: string; errorDetail: stri
   return { error: `HTTP ${status}`, errorDetail: `Unexpected HTTP status ${status}` }
 }
 
-type Protocol = 'http' | 'socks4' | 'socks5'
-
 function createDispatcher(
   host: string,
   port: number,
   protocol: Protocol,
   username?: string,
   password?: string,
-) {
+): Agent | ProxyAgent {
   if (protocol === 'socks4' || protocol === 'socks5') {
     const socksType = protocol === 'socks4' ? 4 : 5
     return new Agent({
@@ -98,23 +97,14 @@ function createDispatcher(
       },
     })
   }
-
-  // HTTP proxy
   const auth = username && password
     ? `${encodeURIComponent(username)}:${encodeURIComponent(password)}@`
     : ''
   return new ProxyAgent({ uri: `http://${auth}${host}:${port}` })
 }
 
-async function proxyFetch(
-  dispatcher: Agent | ProxyAgent,
-  targetUrl: string,
-  timeoutMs: number,
-) {
-  return uFetch(targetUrl, {
-    dispatcher,
-    signal: AbortSignal.timeout(timeoutMs),
-  })
+async function proxyFetch(dispatcher: Agent | ProxyAgent, targetUrl: string, timeoutMs: number) {
+  return uFetch(targetUrl, { dispatcher, signal: AbortSignal.timeout(timeoutMs) })
 }
 
 export async function testProxy(
@@ -126,17 +116,15 @@ export async function testProxy(
   protocol: Protocol = 'http',
 ): Promise<TestResult> {
   const dispatcher = createDispatcher(host, port, protocol, username, password)
-
   const anonTimeout = Math.min(timeoutMs, 5000)
 
-  // Run ip check and anon check concurrently
   const start = Date.now()
   let ms = 0
+
   const [ipSettled, anonResp] = await Promise.all([
     Promise.allSettled([
       proxyFetch(dispatcher, 'http://ip-api.com/json', timeoutMs).then(r => { ms = Date.now() - start; return r }),
     ]).then(([r]) => r),
-    // Race two independent judge services — whichever responds first wins
     Promise.any([
       proxyFetch(dispatcher, 'http://httpbin.org/headers', anonTimeout),
       proxyFetch(dispatcher, 'http://postman-echo.com/headers', anonTimeout),
@@ -151,7 +139,9 @@ export async function testProxy(
   if (!ipResp.ok) return { ok: false, ...categorizeHttpError(ipResp.status) }
 
   const data = await ipResp.json() as IpApiResponse
-  if (data.status !== 'success' || !data.query) return { ok: false, error: 'IP lookup failed', errorDetail: 'Connected to proxy but IP lookup returned an unexpected response' }
+  if (data.status !== 'success' || !data.query) {
+    return { ok: false, error: 'IP lookup failed', errorDetail: 'Connected to proxy but IP lookup returned an unexpected response' }
+  }
 
   let anonymity: 'elite' | 'anonymous' | 'transparent' | 'unknown' = 'unknown'
   if (anonResp?.ok) {
