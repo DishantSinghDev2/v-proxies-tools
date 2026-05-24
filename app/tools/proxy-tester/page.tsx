@@ -49,6 +49,10 @@ const FAQ = [
     a: 'When testing rotating proxies (like residential or mobile pools), all concurrent requests may hit the same exit node. Adding a delay of 1–5 seconds forces the pool to rotate and assign different IPs, giving more accurate results.',
   },
   {
+    q: 'Is my proxy username and password safe?',
+    a: 'Yes. Credentials are encrypted in your browser using ECDH P-256 + AES-256-GCM before the request leaves your device. The server decrypts them in memory only for the duration of the test — they are never logged, stored, or visible to any third party including Cloudflare.',
+  },
+  {
     q: 'Is this tool free?',
     a: 'Yes — completely free with no sign-up required. The proxy tester runs server-side so your real IP is never exposed during testing.',
   },
@@ -191,6 +195,36 @@ export default function ProxyTesterPage() {
           <p className="text-[#9ca3af] text-sm leading-relaxed mb-6">
             Our tool runs all proxy tests server-side using Node.js with <strong className="text-white">CONNECT tunneling</strong> (via HTTPS targets). This ensures the proxy is actually being used for the test traffic — not bypassed. Your real IP is never part of the test request.
           </p>
+
+          <h2 className="text-xl font-bold text-white mb-4 mt-8">Your Proxy Credentials Are End-to-End Encrypted</h2>
+          <p className="text-[#9ca3af] text-sm leading-relaxed mb-4">
+            When you enter a username and password, they are <strong className="text-white">encrypted in your browser</strong> before the request leaves your device — using <strong className="text-white">ECDH P-256 + AES-256-GCM</strong>, the same cryptographic primitives used in TLS. The server receives only an encrypted blob; the plaintext credentials exist only in memory during the test and are never written to any log.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+            {[
+              {
+                icon: '🔑',
+                title: 'Encrypted before sending',
+                desc: 'Your browser generates a one-time keypair per request and encrypts credentials locally. Only the encrypted envelope travels over the network.',
+              },
+              {
+                icon: '🚫',
+                title: 'Invisible to Cloudflare',
+                desc: 'The Cloudflare edge layer only ever sees the encrypted blob — even if request bodies were logged, credentials would be unreadable.',
+              },
+              {
+                icon: '🧹',
+                title: 'Never stored or logged',
+                desc: 'The backend decrypts credentials in memory, runs the proxy test, then discards them. No database writes, no log entries, no traces.',
+              },
+            ].map(({ icon, title, desc }) => (
+              <div key={title} className="p-4 rounded-xl border border-[#1a1a1a] bg-[#0f0f0f]">
+                <p className="text-lg mb-2">{icon}</p>
+                <p className="text-sm font-semibold text-white mb-1">{title}</p>
+                <p className="text-xs text-[#9ca3af] leading-relaxed">{desc}</p>
+              </div>
+            ))}
+          </div>
 
           <h2 className="text-xl font-bold text-white mb-4 mt-8">Tips for Accurate Results</h2>
           <ul className="space-y-2 mb-8 text-sm text-[#9ca3af]">

@@ -48,6 +48,7 @@ Also check out the **[VP Proxy Switcher](https://github.com/DishantSinghDev2/vp-
 
 ## Features
 
+- **End-to-end encrypted credentials** — proxy usernames and passwords are encrypted in the browser before leaving your device; nothing is ever logged in plaintext
 - **Server-side testing** — proxy requests never touch your machine; your real IP stays private
 - **Bulk proxy tester** — paste any number of proxies, configure threads (1–50), timeout, and delay
 - **All common formats** — `host:port`, `host:port:user:pass`, `user:pass@host:port`, `http://`, `socks4://`, `socks5://`
@@ -72,6 +73,47 @@ Because tests run on Cloudflare's edge network, results are consistent regardles
 
 ---
 
+## Security — End-to-End Encrypted Credentials
+
+Proxy credentials (username + password) are encrypted **in the browser** before the request leaves your device, using **ECDH P-256 + AES-256-GCM**.
+
+```
+Browser                          Cloudflare Worker              Node.js Backend
+───────                          ─────────────────              ───────────────
+Generate ephemeral ECDH keypair
+Derive shared secret (ECDH)
+Encrypt {host,port,user,pass}
+  → AES-256-GCM ciphertext  ──►  Forward encrypted blob  ──►  Decrypt in memory
+                                  (never sees plaintext)        Run proxy test
+                             ◄──  Return test result      ◄──  Discard credentials
+```
+
+**Guarantees:**
+- Cloudflare edge only ever handles the encrypted envelope — credentials are unreadable even in CF request logs
+- The Node.js backend decrypts in memory for the duration of the test, then discards — no writes to disk or logs
+- A fresh ephemeral keypair is generated per request, so no two requests share a key
+- If the backend is unreachable, the Cloudflare Worker decrypts and falls back to `cloudflare:sockets` using its own Wrangler secret — credentials never travel in plaintext at any hop
+
+The key pair is generated once by the operator (`npm run generate-keys` in `proxy-backend/`) and stored as a Wrangler secret + backend `.env`. See [`proxy-backend/README.md`](proxy-backend/README.md) for setup instructions.
+
+---
+
+## Architecture
+
+```
+                    ┌─────────────────────────────────────────┐
+                    │          Cloudflare Worker               │
+Browser  ──HTTPS──► │  /api/proxy-test                         │
+(encrypted blob)    │    1. Try Node.js backend  ──HTTP──►  Node.js Backend
+                    │    2. Fallback: decrypt +                │  (Fastify + undici)
+                    │       cloudflare:sockets                 │
+                    └─────────────────────────────────────────┘
+```
+
+The **Node.js backend** (`proxy-backend/`) is optional but recommended for production — it uses `undici`'s `ProxyAgent` for more reliable proxy handling and keeps the Cloudflare Worker as a hot standby. Both share the same ECDH keypair.
+
+---
+
 ## Get Started
 
 ### Live site
@@ -91,6 +133,8 @@ npm run dev
 
 Open [http://localhost:3000](http://localhost:3000).
 
+> **Note:** Encryption is disabled in local dev unless you add keys to `.env.local`. The tool falls back to plaintext automatically — fine for development.
+
 ### Deploy to Cloudflare Workers
 
 ```bash
@@ -104,6 +148,24 @@ Or use the combined command:
 npm run deploy
 ```
 
+### Deploy the Node.js backend (recommended)
+
+See [`proxy-backend/README.md`](proxy-backend/README.md) for full instructions. Short version:
+
+```bash
+cd proxy-backend
+npm install
+npm run generate-keys   # generate ECDH keypair — follow the printed instructions
+cp .env.example .env    # fill in the generated keys + a random BACKEND_TOKEN
+docker compose up -d    # start on your server
+```
+
+Then add to `wrangler.toml` / `wrangler secret put`:
+- `ECDH_PUBLIC_KEY_B64` — in `[vars]`
+- `PROXY_BACKEND_URL` — in `[vars]`
+- `PROXY_BACKEND_TOKEN` — secret
+- `ECDH_PRIVATE_KEY_JWK` — secret (for CF fallback decryption)
+
 ---
 
 ## Tech Stack
@@ -112,9 +174,10 @@ npm run deploy
 |---|---|
 | Framework | [Next.js 16](https://nextjs.org) (App Router) |
 | Adapter | [OpenNext for Cloudflare](https://opennext.js.org/cloudflare) |
-| Runtime | [Cloudflare Workers](https://workers.cloudflare.com) |
-| TCP sockets | [`cloudflare:sockets`](https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/) |
-| Styling | Tailwind CSS |
+| CF Runtime | [Cloudflare Workers](https://workers.cloudflare.com) + `cloudflare:sockets` |
+| Backend | [Fastify](https://fastify.dev) + [undici](https://undici.nodejs.org) (Node.js 22) |
+| Encryption | ECDH P-256 + AES-256-GCM (Web Crypto API — browser, CF, Node.js) |
+| Styling | Tailwind CSS v4 |
 | IP Geo | [ip-api.com](https://ip-api.com) |
 | Anonymity check | [httpbin.org](https://httpbin.org/headers) |
 
@@ -127,13 +190,26 @@ app/
   page.tsx                        # tools home / grid
   layout.tsx                      # nav, footer, metadata
   globals.css
+  lib/
+    crypto.ts                     # AES-256-GCM decryption (CF Worker / Node runtime)
   api/
-    proxy-test/route.ts           # proxy test endpoint (cloudflare:sockets)
+    public-key/route.ts           # serves the ECDH public key to the browser
+    proxy-test/route.ts           # proxy test endpoint — backend forward + CF fallback
     proxy-judge/route.ts          # header mirror for anonymity detection
   tools/
     proxy-tester/
       page.tsx                    # SEO page wrapper + FAQ
-      ProxyTesterTool.tsx         # bulk + single tester UI
+      ProxyTesterTool.tsx         # bulk + single tester UI (client-side encryption)
+proxy-backend/
+  src/
+    index.ts                      # Fastify server
+    crypto.ts                     # ECDH key loading + AES-256-GCM decryption
+    tester.ts                     # proxy testing with undici ProxyAgent
+  scripts/
+    generate-keys.mjs             # one-shot ECDH keypair generator
+  Dockerfile
+  docker-compose.yml
+  README.md
 public/
   logo.svg
 scripts/
@@ -147,11 +223,18 @@ open-next.config.ts
 ## Scripts
 
 ```bash
+# Next.js app
 npm run dev            # local dev server (Next.js, Turbopack)
 npm run build          # Next.js production build
 npm run build:worker   # full Cloudflare Workers build (Next + OpenNext)
 npm run preview        # build + run with wrangler dev
 npm run deploy         # build + wrangler deploy
+
+# Node.js backend (run from proxy-backend/)
+npm run generate-keys  # generate ECDH keypair
+npm run dev            # local dev with hot reload
+npm run build          # compile TypeScript
+npm run start          # run compiled output
 ```
 
 ---
