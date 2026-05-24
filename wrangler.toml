@@ -9,6 +9,15 @@ binding = "ASSETS"
 
 [vars]
 NEXT_PUBLIC_SITE_URL = "https://tools.vproxies.app"
+# Public key for client-side ECDH encryption — set after running `npm run generate-keys` in proxy-backend/
+# ECDH_PUBLIC_KEY_B64 = ""
+
+# Node.js backend URL (optional — CF Worker is the fallback when not set)
+# PROXY_BACKEND_URL = "https://your-backend.example.com"
+
+# Secrets — set via `wrangler secret put <NAME>` (never put real values here)
+# PROXY_BACKEND_TOKEN = "<bearer-token-matching-backend-BACKEND_TOKEN>"
+# ECDH_PRIVATE_KEY_JWK = "<private-key-json-from-generate-keys>"
 
 # Custom domain (add after deploying)
 # [[routes]]

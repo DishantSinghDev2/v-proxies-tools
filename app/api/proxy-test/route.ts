@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import type { Socket } from 'cloudflare:sockets'
+import { decryptPayload } from '@/app/lib/crypto'
 
 export const runtime = 'nodejs'
 
-// Lazy-loaded at request time only — not available in Node.js build environment
 async function cfConnect(hostname: string, port: number): Promise<Socket> {
   const mod = await import(
     /* webpackIgnore: true */
@@ -101,62 +101,114 @@ async function proxyFetch(
   return { status, body, ms: Date.now() - start }
 }
 
+async function testWithCfSockets(
+  host: string,
+  port: number,
+  proxyAuth: string,
+  timeout: number,
+) {
+  const anonTimeout = Math.min(timeout, 8000)
+  const [ipResult, anonResult] = await Promise.allSettled([
+    proxyFetch(host, port, 'ip-api.com', '/json', proxyAuth, timeout),
+    proxyFetch(host, port, 'httpbin.org', '/headers', proxyAuth, anonTimeout),
+  ])
+
+  if (ipResult.status === 'rejected') throw ipResult.reason
+  const { status, body, ms } = ipResult.value
+  if (status !== 200) throw new Error(`HTTP ${status}`)
+
+  const data = JSON.parse(body) as IpApiResponse
+  if (data.status !== 'success' || !data.query) throw new Error('IP lookup failed')
+
+  let anonymity: 'elite' | 'anonymous' | 'transparent' | 'unknown' = 'unknown'
+  if (anonResult.status === 'fulfilled') {
+    try {
+      const anonData = JSON.parse(anonResult.value.body) as { headers?: Record<string, string> }
+      const keys = Object.keys(anonData.headers ?? {}).map(k => k.toLowerCase())
+      if (keys.some(k => ['x-forwarded-for', 'x-real-ip', 'forwarded'].includes(k))) {
+        anonymity = 'transparent'
+      } else if (keys.some(k => k === 'via' || k.startsWith('proxy-') || k === 'x-proxy-id')) {
+        anonymity = 'anonymous'
+      } else {
+        anonymity = 'elite'
+      }
+    } catch { /* best-effort */ }
+  }
+
+  return {
+    ok: true,
+    ip: data.query,
+    ms,
+    anonymity,
+    country: data.countryCode,
+    countryCode: data.countryCode,
+    city: data.city,
+    region: data.regionName,
+    isp: data.isp ?? '',
+  }
+}
+
 export async function POST(req: NextRequest) {
-  let input: { host: string; port: number; username?: string; password?: string; timeout?: number }
+  let input: {
+    epk?: string; iv?: string; ct?: string
+    host?: string; port?: number; username?: string; password?: string
+    timeout?: number
+  }
   try {
     input = await req.json()
   } catch {
     return NextResponse.json({ ok: false, error: 'Invalid JSON' }, { status: 400 })
   }
 
-  const { host, port, username, password, timeout = 15000 } = input
-  if (!host || !port) {
-    return NextResponse.json({ ok: false, error: 'Missing host or port' }, { status: 400 })
+  const { timeout = 15000 } = input
+  const isEncrypted = input.epk && input.iv && input.ct
+
+  // Forward to Node.js backend if configured (preferred path)
+  const backendUrl = process.env.PROXY_BACKEND_URL
+  const backendToken = process.env.PROXY_BACKEND_TOKEN
+  if (backendUrl && backendToken && isEncrypted) {
+    try {
+      const backendRes = await fetch(`${backendUrl}/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${backendToken}` },
+        body: JSON.stringify({ epk: input.epk, iv: input.iv, ct: input.ct, timeout }),
+        signal: AbortSignal.timeout(timeout + 3000),
+      })
+      if (backendRes.ok) {
+        return NextResponse.json(await backendRes.json())
+      }
+    } catch { /* fall through to CF Worker fallback */ }
   }
 
-  const proxyAuth = username && password ? `${username}:${password}` : ''
+  // Resolve credentials (CF Worker fallback or local dev plaintext)
+  let host: string, port: number, proxyAuth: string
+
+  if (isEncrypted) {
+    const privKeyJwk = process.env.ECDH_PRIVATE_KEY_JWK
+    if (!privKeyJwk) {
+      return NextResponse.json({ ok: false, error: 'Encryption key not configured' }, { status: 503 })
+    }
+    try {
+      const { host: h, port: p, username, password } = await decryptPayload(
+        input.epk!, input.iv!, input.ct!, privKeyJwk,
+      )
+      host = h
+      port = p
+      proxyAuth = username && password ? `${username}:${password}` : ''
+    } catch {
+      return NextResponse.json({ ok: false, error: 'Decryption failed' }, { status: 400 })
+    }
+  } else if (input.host && input.port) {
+    host = input.host
+    port = input.port
+    proxyAuth = input.username && input.password ? `${input.username}:${input.password}` : ''
+  } else {
+    return NextResponse.json({ ok: false, error: 'Missing required fields' }, { status: 400 })
+  }
 
   try {
-    // Fire both requests concurrently — ip lookup + anonymity check run in parallel
-    const anonTimeout = Math.min(timeout, 8000)
-    const [ipResult, anonResult] = await Promise.allSettled([
-      proxyFetch(host, port, 'ip-api.com', '/json', proxyAuth, timeout),
-      proxyFetch(host, port, 'httpbin.org', '/headers', proxyAuth, anonTimeout),
-    ])
-
-    if (ipResult.status === 'rejected') throw ipResult.reason
-    const { status, body, ms } = ipResult.value
-    if (status !== 200) throw new Error(`HTTP ${status}`)
-
-    const data = JSON.parse(body) as IpApiResponse
-    if (data.status !== 'success' || !data.query) throw new Error('IP lookup failed')
-
-    let anonymity: 'elite' | 'anonymous' | 'transparent' | 'unknown' = 'unknown'
-    if (anonResult.status === 'fulfilled') {
-      try {
-        const anonData = JSON.parse(anonResult.value.body) as { headers?: Record<string, string> }
-        const keys = Object.keys(anonData.headers ?? {}).map(k => k.toLowerCase())
-        if (keys.some(k => ['x-forwarded-for', 'x-real-ip', 'forwarded'].includes(k))) {
-          anonymity = 'transparent'
-        } else if (keys.some(k => k === 'via' || k.startsWith('proxy-') || k === 'x-proxy-id')) {
-          anonymity = 'anonymous'
-        } else {
-          anonymity = 'elite'
-        }
-      } catch { /* best-effort */ }
-    }
-
-    return NextResponse.json({
-      ok: true,
-      ip: data.query,
-      ms,
-      anonymity,
-      country: data.countryCode,
-      countryCode: data.countryCode,
-      city: data.city,
-      region: data.regionName,
-      isp: data.isp ?? '',
-    })
+    const result = await testWithCfSockets(host, port, proxyAuth, timeout)
+    return NextResponse.json(result)
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Unknown error'
     const isTimeout = msg.toLowerCase().includes('timeout') || msg.includes('abort')

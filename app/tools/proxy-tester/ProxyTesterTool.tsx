@@ -1,6 +1,44 @@
 'use client'
 
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
+
+async function fetchServerPublicKey(): Promise<CryptoKey | null> {
+  try {
+    const res = await fetch('/api/public-key')
+    if (!res.ok) return null
+    const { publicKey } = await res.json() as { publicKey?: string }
+    if (!publicKey) return null
+    const keyBytes = Uint8Array.from(atob(publicKey), c => c.charCodeAt(0))
+    return crypto.subtle.importKey('raw', keyBytes, { name: 'ECDH', namedCurve: 'P-256' }, false, [])
+  } catch {
+    return null
+  }
+}
+
+async function encryptForServer(
+  payload: { host: string; port: number; username?: string; password?: string },
+  serverPubKey: CryptoKey,
+): Promise<{ epk: string; iv: string; ct: string }> {
+  const ephemeral = await crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey'])
+  const aesKey = await crypto.subtle.deriveKey(
+    { name: 'ECDH', public: serverPubKey },
+    ephemeral.privateKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt'],
+  )
+  const epkRaw = await crypto.subtle.exportKey('raw', ephemeral.publicKey)
+  const epk = btoa(String.fromCharCode(...new Uint8Array(epkRaw)))
+  const ivBytes = crypto.getRandomValues(new Uint8Array(12))
+  const iv = btoa(String.fromCharCode(...ivBytes))
+  const ctBuf = await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv: ivBytes },
+    aesKey,
+    new TextEncoder().encode(JSON.stringify(payload)),
+  )
+  const ct = btoa(String.fromCharCode(...new Uint8Array(ctBuf)))
+  return { epk, iv, ct }
+}
 
 type Protocol = 'http' | 'socks4' | 'socks5'
 type Anonymity = 'elite' | 'anonymous' | 'transparent' | 'unknown'
@@ -137,22 +175,36 @@ export default function ProxyTesterTool() {
   const [delay, setDelay] = useState<DelayOption>(0)
 
   const abortRef = useRef(false)
+  const serverPubKeyRef = useRef<CryptoKey | null>(null)
+
+  useEffect(() => {
+    fetchServerPublicKey().then(key => { serverPubKeyRef.current = key })
+  }, [])
+
+  const buildBody = useCallback(async (
+    proxy: { host: string; port: number; username?: string; password?: string },
+  ) => {
+    if (serverPubKeyRef.current) {
+      return await encryptForServer(proxy, serverPubKeyRef.current)
+    }
+    return proxy
+  }, [])
 
   const testSingle = useCallback(async () => {
     if (!sHost || !sPort) return
     setSTesting(true)
     setSResult({ id: 'single', raw: `${sHost}:${sPort}`, status: 'testing' })
     try {
+      const payload = await buildBody({
+        host: sHost,
+        port: parseInt(sPort),
+        username: sUser || undefined,
+        password: sPass || undefined,
+      })
       const res = await fetch('/api/proxy-test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          host: sHost,
-          port: parseInt(sPort),
-          username: sUser || undefined,
-          password: sPass || undefined,
-          timeout: timeout * 1000,
-        }),
+        body: JSON.stringify({ ...payload, timeout: timeout * 1000 }),
       })
       const data = await res.json()
       setSResult({
@@ -166,7 +218,7 @@ export default function ProxyTesterTool() {
     } finally {
       setSTesting(false)
     }
-  }, [sHost, sPort, sUser, sPass, timeout])
+  }, [sHost, sPort, sUser, sPass, timeout, buildBody])
 
   const runBulk = useCallback(async () => {
     const proxies = bulkText
@@ -191,16 +243,16 @@ export default function ProxyTesterTool() {
         setResults(prev => prev.map(r => r.id === proxy.id ? { ...r, status: 'testing' } : r))
 
         try {
+          const payload = await buildBody({
+            host: proxy.host,
+            port: proxy.port,
+            username: proxy.username,
+            password: proxy.password,
+          })
           const res = await fetch('/api/proxy-test', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              host: proxy.host,
-              port: proxy.port,
-              username: proxy.username,
-              password: proxy.password,
-              timeout: timeout * 1000,
-            }),
+            body: JSON.stringify({ ...payload, timeout: timeout * 1000 }),
           })
           const data = await res.json()
           setResults(prev => prev.map(r =>
@@ -226,7 +278,7 @@ export default function ProxyTesterTool() {
     const workers = Array.from({ length: Math.min(threads, proxies.length) }, () => worker())
     await Promise.all(workers)
     setRunning(false)
-  }, [bulkText, threads, timeout, delay])
+  }, [bulkText, threads, timeout, delay, buildBody])
 
   const stopBulk = () => { abortRef.current = true }
 
