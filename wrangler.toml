@@ -9,8 +9,8 @@ binding = "ASSETS"
 
 [vars]
 NEXT_PUBLIC_SITE_URL = "https://tools.vproxies.app"
-# Public key for client-side ECDH encryption — set after running `npm run generate-keys` in proxy-backend/
-# ECDH_PUBLIC_KEY_B64 = ""
+# Public key for client-side ECDH encryption
+ECDH_PUBLIC_KEY_B64 = "BLuFeYt8WfSlxT5ACIQglasG0To7g2E1OPZ+37UzoJRbyk4YIW+rPOlMMAeMxD+eNeI9NRoTvTTNi8iwl6K3Fp4="
 
 # Node.js backend URL (optional — CF Worker is the fallback when not set)
 # PROXY_BACKEND_URL = "https://your-backend.example.com"

@@ -1,5 +1,5 @@
 import { webcrypto } from 'node:crypto'
-const { subtle } = webcrypto as unknown as Crypto
+const { subtle } = webcrypto
 
 export function loadPrivateKey(jwkJson: string): Promise<CryptoKey> {
   return subtle.importKey(
