@@ -175,12 +175,74 @@ export default function ProxyTesterTool() {
   const [timeout, setTimeout_] = useState(15)
   const [delay, setDelay] = useState<DelayOption>(0)
 
+  const [linkCopied, setLinkCopied] = useState(false)
+  const [autoTestPending, setAutoTestPending] = useState(false)
+
   const abortRef = useRef(false)
   const serverPubKeyRef = useRef<CryptoKey | null>(null)
 
   useEffect(() => {
     fetchServerPublicKey().then(key => { serverPubKeyRef.current = key })
   }, [])
+
+  // Load state from URL params on mount
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const urlMode = params.get('mode') as 'single' | 'bulk' | null
+    const urlHost = params.get('host')
+    const urlPort = params.get('port')
+    const urlUsername = params.get('username')
+    const urlPassword = params.get('password')
+    const urlProtocol = params.get('protocol') as Protocol | null
+    const urlProxies = params.get('proxies')
+    const urlThreads = params.get('threads')
+    const urlTimeout = params.get('timeout')
+    const shouldAutoTest = params.get('autoTest') === 'true'
+    let hasData = false
+
+    if (urlProxies || urlMode === 'bulk') {
+      setMode('bulk')
+      if (urlProxies) {
+        const lines = urlProxies.split(',').map(p => p.trim()).filter(Boolean).slice(0, 100)
+        setBulkText(lines.join('\n'))
+        hasData = lines.length > 0
+      }
+    } else if (urlHost || urlMode === 'single') {
+      setMode('single')
+      if (urlHost) { setSHost(urlHost); hasData = true }
+      if (urlPort) setSPort(urlPort)
+      if (urlUsername) setSUser(urlUsername)
+      if (urlPassword) setSPass(urlPassword)
+      if (urlProtocol && ['http', 'socks4', 'socks5'].includes(urlProtocol)) setSProto(urlProtocol)
+    }
+
+    if (urlThreads) setThreads(Math.min(50, Math.max(1, parseInt(urlThreads) || 5)))
+    if (urlTimeout) setTimeout_(Math.max(1, parseInt(urlTimeout) || 15))
+    if (shouldAutoTest && hasData) setAutoTestPending(true)
+  }, [])
+
+  const copyShareLink = useCallback(() => {
+    const params = new URLSearchParams()
+    if (mode === 'single') {
+      params.set('mode', 'single')
+      if (sHost) params.set('host', sHost)
+      if (sPort) params.set('port', sPort)
+      if (sUser) params.set('username', sUser)
+      if (sPass) params.set('password', sPass)
+      if (sProto !== 'http') params.set('protocol', sProto)
+    } else {
+      params.set('mode', 'bulk')
+      const lines = bulkText.split('\n').filter(Boolean).slice(0, 100)
+      if (lines.length) params.set('proxies', lines.join(','))
+      if (threads !== 5) params.set('threads', String(threads))
+      if (timeout !== 15) params.set('timeout', String(timeout))
+    }
+    params.set('autoTest', 'true')
+    const url = `${window.location.origin}${window.location.pathname}?${params}`
+    navigator.clipboard.writeText(url)
+    setLinkCopied(true)
+    globalThis.setTimeout(() => setLinkCopied(false), 2000)
+  }, [mode, sHost, sPort, sUser, sPass, sProto, bulkText, threads, timeout])
 
   const buildBody = useCallback(async (
     proxy: { host: string; port: number; username?: string; password?: string; protocol: Protocol },
@@ -227,6 +289,7 @@ export default function ProxyTesterTool() {
       .split('\n')
       .map(parseProxy)
       .filter((p): p is ParsedProxy => p !== null)
+      .slice(0, 100)
 
     if (proxies.length === 0) return
 
@@ -283,6 +346,18 @@ export default function ProxyTesterTool() {
     setRunning(false)
   }, [bulkText, threads, timeout, delay, buildBody])
 
+  // Trigger auto-test once URL-param state has settled into the component
+  useEffect(() => {
+    if (!autoTestPending) return
+    if (mode === 'single' && sHost && sPort) {
+      setAutoTestPending(false)
+      testSingle()
+    } else if (mode === 'bulk' && bulkText.trim()) {
+      setAutoTestPending(false)
+      runBulk()
+    }
+  }, [autoTestPending, mode, sHost, sPort, bulkText, testSingle, runBulk])
+
   const stopBulk = () => { abortRef.current = true }
 
   const exportResults = (format: 'txt' | 'csv') => {
@@ -314,6 +389,9 @@ export default function ProxyTesterTool() {
   )
   const aliveCount = results.filter(r => r.status === 'alive').length
   const deadCount = results.filter(r => r.status === 'dead').length
+  const bulkLineCount = bulkText.trim()
+    ? bulkText.split('\n').filter(l => l.trim() && !l.trim().startsWith('#')).length
+    : 0
 
   return (
     <div className="w-full max-w-5xl mx-auto">
@@ -343,6 +421,7 @@ export default function ProxyTesterTool() {
               <input
                 value={sHost}
                 onChange={e => setSHost(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && sHost && sPort && !sTesting) testSingle() }}
                 placeholder="proxy.example.com"
                 className="w-full bg-[#111] border border-[#2a2a2a] rounded-lg px-3 py-2 text-sm text-white placeholder-[#3a3a3a] focus:outline-none focus:border-[#22c55e] transition-colors"
               />
@@ -352,6 +431,7 @@ export default function ProxyTesterTool() {
               <input
                 value={sPort}
                 onChange={e => setSPort(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter' && sHost && sPort && !sTesting) testSingle() }}
                 placeholder="8080"
                 type="number"
                 className="w-full bg-[#111] border border-[#2a2a2a] rounded-lg px-3 py-2 text-sm text-white placeholder-[#3a3a3a] focus:outline-none focus:border-[#22c55e] transition-colors"
@@ -399,14 +479,22 @@ export default function ProxyTesterTool() {
                 className="w-full bg-[#111] border border-[#2a2a2a] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-[#22c55e] transition-colors"
               />
             </div>
-            <div className="flex items-end">
+            <div className="flex items-end gap-2">
               <button
                 onClick={testSingle}
                 disabled={sTesting || !sHost || !sPort}
-                className="w-full py-2 rounded-lg text-sm font-semibold transition-colors disabled:opacity-40"
+                className="flex-1 py-2 rounded-lg text-sm font-semibold transition-colors disabled:opacity-40"
                 style={{ background: '#22c55e', color: '#000' }}
               >
                 {sTesting ? 'Testing…' : 'Test Proxy'}
+              </button>
+              <button
+                onClick={copyShareLink}
+                disabled={!sHost}
+                title="Copy shareable link"
+                className="py-2 px-3 rounded-lg text-sm transition-colors border border-[#2a2a2a] text-[#9ca3af] hover:text-white hover:border-[#444] disabled:opacity-30 shrink-0"
+              >
+                {linkCopied ? '✓' : '⧉'}
               </button>
             </div>
           </div>
@@ -503,7 +591,15 @@ export default function ProxyTesterTool() {
                 ))}
               </select>
             </div>
-            <div className="flex gap-2 ml-auto">
+            <div className="flex gap-2 ml-auto items-center">
+              <button
+                onClick={copyShareLink}
+                disabled={!bulkText.trim()}
+                title="Copy shareable link"
+                className="px-3 py-2 rounded-lg text-sm font-mono transition-colors border border-[#2a2a2a] text-[#9ca3af] hover:text-white hover:border-[#444] disabled:opacity-30"
+              >
+                {linkCopied ? '✓ Copied' : 'Share'}
+              </button>
               {!running ? (
                 <button
                   onClick={runBulk}
@@ -528,6 +624,11 @@ export default function ProxyTesterTool() {
           <div>
             <label className="block text-xs text-[#6b7280] mb-1 font-mono">
               PROXY LIST — one per line: host:port or host:port:user:pass or user:pass@host:port
+              {bulkLineCount > 0 && (
+                <span className={`ml-2 ${bulkLineCount > 100 ? 'text-[#f59e0b]' : 'text-[#4b5563]'}`}>
+                  {bulkLineCount > 100 ? `⚠ ${bulkLineCount}/100 — limited to 100` : `(${bulkLineCount})`}
+                </span>
+              )}
             </label>
             <textarea
               value={bulkText}
