@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
+import Image from "next/image";
 import Link from "next/link";
 import "./globals.css";
 
@@ -17,6 +18,7 @@ export const metadata: Metadata = {
   title: { default: "v-proxies Tools", template: "%s | v-proxies Tools" },
   description: "Free proxy tools — proxy tester, IP checker, DNS leak test and more.",
   metadataBase: new URL("https://tools.vproxies.app"),
+  icons: { icon: "/logo.svg", shortcut: "/logo.svg" },
 };
 
 export default function RootLayout({
@@ -33,6 +35,7 @@ export default function RootLayout({
         <header className="sticky top-0 z-50 w-full border-b border-[#111] bg-[#0d0d0d]/90 backdrop-blur-sm">
           <div className="max-w-5xl mx-auto px-4 md:px-6 h-14 flex items-center justify-between">
             <Link href="/" className="flex items-center gap-2 group">
+              <Image src="/logo.svg" alt="v-proxies logo" width={22} height={22} className="rounded-md" />
               <span className="text-sm font-bold text-white">v-proxies</span>
               <span
                 className="text-[10px] font-mono px-1.5 py-0.5 rounded"
