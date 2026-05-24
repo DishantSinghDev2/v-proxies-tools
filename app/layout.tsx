@@ -49,7 +49,7 @@ export default function RootLayout({
                 Proxy Tester
               </Link>
               <a
-                href="https://vproxies-app.vercel.app"
+                href="https://v-proxies.com"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="text-xs px-3 py-1.5 rounded-lg font-semibold transition-colors"
@@ -68,7 +68,7 @@ export default function RootLayout({
             <p>
               &copy; {new Date().getFullYear()}{" "}
               <a
-                href="https://vproxies-app.vercel.app"
+                href="https://v-proxies.com"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="hover:text-white transition-colors"
@@ -79,7 +79,7 @@ export default function RootLayout({
             </p>
             <div className="flex gap-4">
               <a
-                href="https://vproxies-app.vercel.app/privacy"
+                href="https://v-proxies.com/privacy"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="hover:text-white transition-colors"
@@ -87,7 +87,7 @@ export default function RootLayout({
                 Privacy
               </a>
               <a
-                href="https://vproxies-app.vercel.app/terms"
+                href="https://v-proxies.com/terms"
                 target="_blank"
                 rel="noopener noreferrer"
                 className="hover:text-white transition-colors"

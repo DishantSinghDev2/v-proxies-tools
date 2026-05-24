@@ -100,7 +100,7 @@ export default function ProxyTesterPage() {
             <p className="text-xs text-[#9ca3af]">196+ countries · 99.97% uptime · from $0.99/GB · residential &amp; mobile IPs</p>
           </div>
           <a
-            href="https://vproxies-app.vercel.app/residential"
+            href="https://v-proxies.com/residential"
             target="_blank"
             rel="noopener noreferrer"
             className="flex-shrink-0 px-4 py-2 rounded-lg text-sm font-semibold transition-colors"

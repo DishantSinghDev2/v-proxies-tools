@@ -115,7 +115,7 @@ export default function HomePage() {
         <p className="text-sm font-semibold text-white mb-1">Need proxies that actually work?</p>
         <p className="text-xs text-[#9ca3af] mb-4">196+ countries · 99.97% uptime · from $0.99/GB</p>
         <a
-          href="https://vproxies-app.vercel.app/residential"
+          href="https://v-proxies.com/residential"
           target="_blank"
           rel="noopener noreferrer"
           className="inline-block px-5 py-2 rounded-lg text-sm font-semibold transition-colors"
