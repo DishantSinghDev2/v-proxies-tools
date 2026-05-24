@@ -1,17 +1,9 @@
 import { Agent, ProxyAgent, fetch as uFetch } from 'undici'
 import { SocksClient } from 'socks'
+import geoip from 'geoip-lite'
 import type { Socket } from 'node:net'
 
 export type Protocol = 'http' | 'socks4' | 'socks5'
-
-interface IpApiResponse {
-  status: string
-  query?: string
-  countryCode?: string
-  city?: string
-  regionName?: string
-  isp?: string
-}
 
 export interface TestResult {
   ok: boolean
@@ -26,6 +18,14 @@ export interface TestResult {
   error?: string
   errorDetail?: string
 }
+
+function getJudgeUrl(): string {
+  if (process.env.JUDGE_URL) return process.env.JUDGE_URL
+  if (process.env.RENDER_EXTERNAL_URL) return `${process.env.RENDER_EXTERNAL_URL}/api/proxy-judge`
+  return 'http://localhost:3000/api/proxy-judge'
+}
+
+const regionNames = new Intl.DisplayNames(['en'], { type: 'region' })
 
 function getErrnoCode(err: unknown): string | undefined {
   if (!(err instanceof Error)) return undefined
@@ -116,57 +116,56 @@ export async function testProxy(
   protocol: Protocol = 'http',
 ): Promise<TestResult> {
   const dispatcher = createDispatcher(host, port, protocol, username, password)
-  const anonTimeout = Math.min(timeoutMs, 5000)
-
+  const judgeUrl = getJudgeUrl()
   const start = Date.now()
-  let ms = 0
 
-  const [ipSettled, anonResp] = await Promise.all([
-    Promise.allSettled([
-      proxyFetch(dispatcher, 'http://ip-api.com/json', timeoutMs).then(r => { ms = Date.now() - start; return r }),
-    ]).then(([r]) => r),
-    Promise.any([
-      proxyFetch(dispatcher, 'http://httpbin.org/headers', anonTimeout),
-      proxyFetch(dispatcher, 'http://postman-echo.com/headers', anonTimeout),
-    ]).catch(() => null),
-  ])
+  // Single request through the proxy to our own judge endpoint
+  let judgeData: { ip: string; headers: Record<string, string> }
+  try {
+    const resp = await proxyFetch(dispatcher, judgeUrl, timeoutMs)
+    const ms_raw = Date.now() - start
+    if (!resp.ok) return { ok: false, ...categorizeHttpError(resp.status) }
+    judgeData = await resp.json() as { ip: string; headers: Record<string, string> }
+    if (!judgeData.ip || judgeData.ip === 'unknown') {
+      return { ok: false, error: 'IP lookup failed', errorDetail: 'Proxy connected but exit IP could not be determined' }
+    }
+    // ms measured up to judge response headers (before body read — close enough)
+    const ms = ms_raw
 
-  if (ipSettled.status === 'rejected') {
-    return { ok: false, ...categorizeError(ipSettled.reason) }
-  }
+    const { ip, headers } = judgeData
 
-  const ipResp = ipSettled.value
-  if (!ipResp.ok) return { ok: false, ...categorizeHttpError(ipResp.status) }
+    // Local geo lookup — instant, no network
+    const geo = geoip.lookup(ip)
+    const countryCode = geo?.country ?? ''
+    const country = countryCode ? (regionNames.of(countryCode) ?? countryCode) : ''
+    const city = geo?.city ?? ''
+    const region = geo?.region ?? ''
 
-  const data = await ipResp.json() as IpApiResponse
-  if (data.status !== 'success' || !data.query) {
-    return { ok: false, error: 'IP lookup failed', errorDetail: 'Connected to proxy but IP lookup returned an unexpected response' }
-  }
-
-  let anonymity: 'elite' | 'anonymous' | 'transparent' | 'unknown' = 'unknown'
-  if (anonResp?.ok) {
+    // ISP via direct call (not through proxy) — best-effort, non-blocking
+    let isp = ''
     try {
-      const anonData = await anonResp.json() as { headers?: Record<string, string> }
-      const keys = Object.keys(anonData.headers ?? {}).map(k => k.toLowerCase())
-      if (keys.some(k => ['x-forwarded-for', 'x-real-ip', 'forwarded'].includes(k))) {
-        anonymity = 'transparent'
-      } else if (keys.some(k => k === 'via' || k.startsWith('proxy-') || k === 'x-proxy-id')) {
-        anonymity = 'anonymous'
-      } else {
-        anonymity = 'elite'
+      const ispResp = await uFetch(`http://ip-api.com/json/${ip}?fields=isp,org`, {
+        signal: AbortSignal.timeout(3000),
+      })
+      if (ispResp.ok) {
+        const ispData = await ispResp.json() as { isp?: string; org?: string }
+        isp = ispData.isp || ispData.org || ''
       }
-    } catch { /* best-effort */ }
-  }
+    } catch { /* non-critical */ }
 
-  return {
-    ok: true,
-    ip: data.query,
-    ms,
-    anonymity,
-    country: data.countryCode,
-    countryCode: data.countryCode,
-    city: data.city,
-    region: data.regionName,
-    isp: data.isp ?? '',
+    // Anonymity from headers returned by the judge
+    const headerKeys = Object.keys(headers).map(k => k.toLowerCase())
+    let anonymity: 'elite' | 'anonymous' | 'transparent' | 'unknown' = 'unknown'
+    if (headerKeys.some(k => ['x-forwarded-for', 'x-real-ip', 'forwarded', 'client-ip'].includes(k))) {
+      anonymity = 'transparent'
+    } else if (headerKeys.some(k => k === 'via' || k.startsWith('proxy-') || k === 'x-proxy-id')) {
+      anonymity = 'anonymous'
+    } else {
+      anonymity = 'elite'
+    }
+
+    return { ok: true, ip, ms, anonymity, country, countryCode, city, region, isp }
+  } catch (err) {
+    return { ok: false, ...categorizeError(err) }
   }
 }
