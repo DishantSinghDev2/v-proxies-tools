@@ -7,16 +7,10 @@ export type Protocol = 'http' | 'socks4' | 'socks5'
 interface IpApiResponse {
   status: string
   query?: string
-  country?: string
   countryCode?: string
   city?: string
   regionName?: string
   isp?: string
-}
-
-interface JudgeResponse {
-  ip: string
-  headers: Record<string, string>
 }
 
 export interface TestResult {
@@ -33,18 +27,12 @@ export interface TestResult {
   errorDetail?: string
 }
 
-function getJudgeUrl(): string {
-  return process.env.JUDGE_URL ?? 'https://tools.v-proxies.com/api/proxy-judge'
-}
-
-// Walk the full cause chain — undici sometimes wraps errors 2–3 levels deep
 function getErrnoCode(err: unknown): string | undefined {
-  let cur: unknown = err
-  while (cur instanceof Error) {
-    const code = (cur as NodeJS.ErrnoException).code
-    if (code) return code
-    cur = (cur as { cause?: unknown }).cause
-  }
+  if (!(err instanceof Error)) return undefined
+  const code = (err as NodeJS.ErrnoException).code
+  if (code) return code
+  const cause = (err as { cause?: unknown }).cause
+  if (cause instanceof Error) return (cause as NodeJS.ErrnoException).code
   return undefined
 }
 
@@ -119,31 +107,6 @@ async function proxyFetch(dispatcher: Agent | ProxyAgent, targetUrl: string, tim
   return uFetch(targetUrl, { dispatcher, signal: AbortSignal.timeout(timeoutMs) })
 }
 
-function detectAnonymity(judge: JudgeResponse): 'elite' | 'anonymous' | 'transparent' {
-  const { ip: proxyIp, headers } = judge
-  const lh: Record<string, string> = {}
-  for (const [k, v] of Object.entries(headers)) lh[k.toLowerCase()] = v
-
-  // Render's LB appends the connecting IP to x-forwarded-for.
-  // Anything else in that list was added by the proxy itself → transparent.
-  const xff = lh['x-forwarded-for'] ?? ''
-  const xffIps = xff.split(',').map(s => s.trim()).filter(Boolean)
-  const leakedInXff = xffIps.filter(ip => ip !== proxyIp)
-
-  // x-real-ip set by Render will equal the proxy exit IP; any other value was proxy-injected.
-  const xRealIp = lh['x-real-ip']
-  const leakedXRealIp = xRealIp && xRealIp !== proxyIp
-
-  if (leakedInXff.length > 0 || leakedXRealIp || lh['forwarded'] || lh['client-ip']) {
-    return 'transparent'
-  }
-  if (lh['via'] || lh['proxy-connection'] || lh['x-proxy-id'] ||
-      Object.keys(lh).some(k => k.startsWith('proxy-'))) {
-    return 'anonymous'
-  }
-  return 'elite'
-}
-
 export async function testProxy(
   host: string,
   port: number,
@@ -153,27 +116,19 @@ export async function testProxy(
   protocol: Protocol = 'http',
 ): Promise<TestResult> {
   const dispatcher = createDispatcher(host, port, protocol, username, password)
-  const judgeUrl = getJudgeUrl()
   const anonTimeout = Math.min(timeoutMs, 5000)
 
   const start = Date.now()
   let ms = 0
 
-  // Run both through the proxy concurrently:
-  //  • ip-api.com → exit IP + geo + ISP  (ms stamped on first byte back)
-  //  • our judge  → raw headers for anonymity detection
-  //
-  // Anonymity uses the judge's own detected IP to filter out headers Render's LB
-  // adds itself (x-forwarded-for: <proxy_exit_ip>), so only proxy-leaked IPs flag
-  // a connection as transparent.
-  const [ipSettled, judgeSettled] = await Promise.all([
+  const [ipSettled, anonResp] = await Promise.all([
     Promise.allSettled([
-      proxyFetch(dispatcher, 'http://ip-api.com/json', timeoutMs)
-        .then(r => { ms = Date.now() - start; return r }),
+      proxyFetch(dispatcher, 'http://ip-api.com/json', timeoutMs).then(r => { ms = Date.now() - start; return r }),
     ]).then(([r]) => r),
-    Promise.allSettled([
-      proxyFetch(dispatcher, judgeUrl, anonTimeout),
-    ]).then(([r]) => r),
+    Promise.any([
+      proxyFetch(dispatcher, 'http://httpbin.org/headers', anonTimeout),
+      proxyFetch(dispatcher, 'http://postman-echo.com/headers', anonTimeout),
+    ]).catch(() => null),
   ])
 
   if (ipSettled.status === 'rejected') {
@@ -189,10 +144,17 @@ export async function testProxy(
   }
 
   let anonymity: 'elite' | 'anonymous' | 'transparent' | 'unknown' = 'unknown'
-  if (judgeSettled.status === 'fulfilled' && judgeSettled.value.ok) {
+  if (anonResp?.ok) {
     try {
-      const judgeData = await judgeSettled.value.json() as JudgeResponse
-      anonymity = detectAnonymity(judgeData)
+      const anonData = await anonResp.json() as { headers?: Record<string, string> }
+      const keys = Object.keys(anonData.headers ?? {}).map(k => k.toLowerCase())
+      if (keys.some(k => ['x-forwarded-for', 'x-real-ip', 'forwarded'].includes(k))) {
+        anonymity = 'transparent'
+      } else if (keys.some(k => k === 'via' || k.startsWith('proxy-') || k === 'x-proxy-id')) {
+        anonymity = 'anonymous'
+      } else {
+        anonymity = 'elite'
+      }
     } catch { /* best-effort */ }
   }
 
@@ -201,10 +163,10 @@ export async function testProxy(
     ip: data.query,
     ms,
     anonymity,
-    country: data.country ?? data.countryCode ?? '',
-    countryCode: data.countryCode ?? '',
-    city: data.city ?? '',
-    region: data.regionName ?? '',
+    country: data.countryCode,
+    countryCode: data.countryCode,
+    city: data.city,
+    region: data.regionName,
     isp: data.isp ?? '',
   }
 }
