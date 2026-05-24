@@ -127,32 +127,36 @@ export async function testProxy(
 ): Promise<TestResult> {
   const dispatcher = createDispatcher(host, port, protocol, username, password)
 
-  let ms = 0
-  const start = Date.now()
-  const ipPromise = proxyFetch(dispatcher, 'http://ip-api.com/json', timeoutMs).then(r => {
-    ms = Date.now() - start
-    return r
-  })
+  const anonTimeout = Math.min(timeoutMs, 5000)
 
-  const [ipResult, anonResult] = await Promise.allSettled([
-    ipPromise,
-    proxyFetch(dispatcher, 'http://httpbin.org/headers', Math.min(timeoutMs, 8000)),
+  // Run ip check and anon check concurrently
+  const start = Date.now()
+  let ms = 0
+  const [ipSettled, anonResp] = await Promise.all([
+    Promise.allSettled([
+      proxyFetch(dispatcher, 'http://ip-api.com/json', timeoutMs).then(r => { ms = Date.now() - start; return r }),
+    ]).then(([r]) => r),
+    // Race two independent judge services — whichever responds first wins
+    Promise.any([
+      proxyFetch(dispatcher, 'http://httpbin.org/headers', anonTimeout),
+      proxyFetch(dispatcher, 'http://postman-echo.com/headers', anonTimeout),
+    ]).catch(() => null),
   ])
 
-  if (ipResult.status === 'rejected') {
-    return { ok: false, ...categorizeError(ipResult.reason) }
+  if (ipSettled.status === 'rejected') {
+    return { ok: false, ...categorizeError(ipSettled.reason) }
   }
 
-  const ipResp = ipResult.value
+  const ipResp = ipSettled.value
   if (!ipResp.ok) return { ok: false, ...categorizeHttpError(ipResp.status) }
 
   const data = await ipResp.json() as IpApiResponse
-  if (data.status !== 'success' || !data.query) return { ok: false, error: 'IP lookup failed' }
+  if (data.status !== 'success' || !data.query) return { ok: false, error: 'IP lookup failed', errorDetail: 'Connected to proxy but IP lookup returned an unexpected response' }
 
   let anonymity: 'elite' | 'anonymous' | 'transparent' | 'unknown' = 'unknown'
-  if (anonResult.status === 'fulfilled') {
+  if (anonResp?.ok) {
     try {
-      const anonData = await anonResult.value.json() as { headers?: Record<string, string> }
+      const anonData = await anonResp.json() as { headers?: Record<string, string> }
       const keys = Object.keys(anonData.headers ?? {}).map(k => k.toLowerCase())
       if (keys.some(k => ['x-forwarded-for', 'x-real-ip', 'forwarded'].includes(k))) {
         anonymity = 'transparent'

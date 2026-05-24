@@ -107,10 +107,14 @@ async function testWithCfSockets(
   proxyAuth: string,
   timeout: number,
 ) {
-  const anonTimeout = Math.min(timeout, 8000)
+  const anonTimeout = Math.min(timeout, 5000)
   const [ipResult, anonResult] = await Promise.allSettled([
     proxyFetch(host, port, 'ip-api.com', '/json', proxyAuth, timeout),
-    proxyFetch(host, port, 'httpbin.org', '/headers', proxyAuth, anonTimeout),
+    // Race two judge services — whichever responds first wins
+    Promise.any([
+      proxyFetch(host, port, 'httpbin.org', '/headers', proxyAuth, anonTimeout),
+      proxyFetch(host, port, 'postman-echo.com', '/headers', proxyAuth, anonTimeout),
+    ]),
   ])
 
   if (ipResult.status === 'rejected') throw ipResult.reason
