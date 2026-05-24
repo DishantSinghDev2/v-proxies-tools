@@ -80,7 +80,23 @@ export default function RootLayout({
               </a>
               {" "}— Free proxy tools, no sign-up required.
             </p>
-            <div className="flex gap-4">
+            <div className="flex flex-wrap justify-center sm:justify-end gap-4">
+              <a
+                href="https://github.com/DishantSinghDev2/v-proxies-tools"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:text-white transition-colors"
+              >
+                Open Source
+              </a>
+              <a
+                href="https://github.com/DishantSinghDev2/vp-proxy-switcher"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="hover:text-white transition-colors"
+              >
+                Browser Extension
+              </a>
               <a
                 href="https://v-proxies.com/privacy"
                 target="_blank"
