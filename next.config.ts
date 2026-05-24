@@ -1,8 +1,9 @@
 import type { NextConfig } from "next"
 
 const nextConfig: NextConfig = {
-  // Required for @opennextjs/cloudflare
   output: "standalone",
+  assetPrefix: "",
+  trailingSlash: false,
 }
 
 export default nextConfig
