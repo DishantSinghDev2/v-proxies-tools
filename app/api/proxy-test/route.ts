@@ -117,29 +117,34 @@ export async function POST(req: NextRequest) {
   const proxyAuth = username && password ? `${username}:${password}` : ''
 
   try {
-    const { status, body, ms } = await proxyFetch(
-      host, port, 'ip-api.com', '/json', proxyAuth, timeout,
-    )
+    // Fire both requests concurrently — ip lookup + anonymity check run in parallel
+    const anonTimeout = Math.min(timeout, 8000)
+    const [ipResult, anonResult] = await Promise.allSettled([
+      proxyFetch(host, port, 'ip-api.com', '/json', proxyAuth, timeout),
+      proxyFetch(host, port, 'httpbin.org', '/headers', proxyAuth, anonTimeout),
+    ])
+
+    if (ipResult.status === 'rejected') throw ipResult.reason
+    const { status, body, ms } = ipResult.value
     if (status !== 200) throw new Error(`HTTP ${status}`)
 
     const data = JSON.parse(body) as IpApiResponse
     if (data.status !== 'success' || !data.query) throw new Error('IP lookup failed')
 
     let anonymity: 'elite' | 'anonymous' | 'transparent' | 'unknown' = 'unknown'
-    try {
-      const { body: anonBody } = await proxyFetch(
-        host, port, 'httpbin.org', '/headers', proxyAuth, Math.min(timeout, 8000),
-      )
-      const anonData = JSON.parse(anonBody) as { headers?: Record<string, string> }
-      const keys = Object.keys(anonData.headers ?? {}).map(k => k.toLowerCase())
-      if (keys.some(k => ['x-forwarded-for', 'x-real-ip', 'forwarded'].includes(k))) {
-        anonymity = 'transparent'
-      } else if (keys.some(k => k === 'via' || k.startsWith('proxy-') || k === 'x-proxy-id')) {
-        anonymity = 'anonymous'
-      } else {
-        anonymity = 'elite'
-      }
-    } catch { /* best-effort */ }
+    if (anonResult.status === 'fulfilled') {
+      try {
+        const anonData = JSON.parse(anonResult.value.body) as { headers?: Record<string, string> }
+        const keys = Object.keys(anonData.headers ?? {}).map(k => k.toLowerCase())
+        if (keys.some(k => ['x-forwarded-for', 'x-real-ip', 'forwarded'].includes(k))) {
+          anonymity = 'transparent'
+        } else if (keys.some(k => k === 'via' || k.startsWith('proxy-') || k === 'x-proxy-id')) {
+          anonymity = 'anonymous'
+        } else {
+          anonymity = 'elite'
+        }
+      } catch { /* best-effort */ }
+    }
 
     return NextResponse.json({
       ok: true,
